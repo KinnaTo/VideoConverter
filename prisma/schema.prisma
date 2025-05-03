@@ -1,0 +1,82 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+    provider = "prisma-client-ts"
+    output   = "../generated/prisma"
+}
+
+datasource db {
+    provider = "sqlite"
+    url      = "file:./dev.db"
+}
+
+enum TaskStatus {
+    WAITING
+    RUNNING
+    FINISHED
+    FAILED
+}
+
+model Token {
+    id    String @id @default(cuid())
+    token String @unique @default(uuid())
+
+    maxPriority Int @default(10)
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([token])
+}
+
+model Queue {
+    id   String @id @default(cuid())
+    name String
+
+    defaultPriority Int    @default(0)
+    tasks           Task[]
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+}
+
+model Task {
+    id       String     @id @default(cuid())
+    name     String
+    status   TaskStatus @default(WAITING)
+    priority Int        @default(0)
+    queue    Queue      @relation(fields: [queueId], references: [id])
+    queueId  String
+
+    result Json?
+    error  String?
+
+    source String?
+
+    machine   Machine? @relation(fields: [machineId], references: [id])
+    machineId String?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+}
+
+model Machine {
+    id           String @id @default(cuid())
+    name         String
+    ip           String
+    token        String @unique @default(uuid())
+    tasks        Task[]
+    successCount Int    @default(0)
+    failedCount  Int    @default(0)
+
+    deviceInfo Json?
+
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+    heartbeat      DateTime?
+    firstHeartbeat DateTime?
+}

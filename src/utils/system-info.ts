@@ -1,6 +1,6 @@
+import { exec } from 'node:child_process';
 import type { Systeminformation } from 'systeminformation';
 import si from 'systeminformation';
-import { exec } from 'child_process';
 import { parseStringPromise } from 'xml2js';
 import logger from './logger';
 
@@ -53,12 +53,7 @@ async function getNvidiaSmiData(): Promise<any | null> {
 
 export async function getSystemInfo(): Promise<{ systemInfo: SystemInfo; encoder: 'cuda' | 'cpu' }> {
     try {
-        const [cpuData, _cpuTemp, memData, diskData] = await Promise.all([
-            si.cpu(),
-            si.cpuTemperature(),
-            si.mem(),
-            si.fsSize(),
-        ]);
+        const [cpuData, _cpuTemp, memData, diskData] = await Promise.all([si.cpu(), si.cpuTemperature(), si.mem(), si.fsSize()]);
 
         const cpuLoad = await si.currentLoad();
 

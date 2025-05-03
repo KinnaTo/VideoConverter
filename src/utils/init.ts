@@ -1,6 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import axios from 'axios';
-import fs from 'fs';
-import path from 'path';
 
 const configPath = path.join(__dirname, '../config.json');
 const hostName = fs.readFileSync('/etc/hostname', 'utf8').replace('\n', '').trim();
@@ -13,17 +13,19 @@ if (!BASE_URL) {
     throw new Error('BASE_URL not found');
 }
 
-
 const regenerateConfig = async () => {
-
-    const res = await axios.post(`${BASE_URL}/api/machine`, {
-        name: hostName,
-        ip: '127.0.0.1',
-    }, {
-        headers: {
-            Authorization: `Bearer ${token}`,
+    const res = await axios.post(
+        `${BASE_URL}/api/machine`,
+        {
+            name: hostName,
+            ip: '127.0.0.1',
         },
-    });
+        {
+            headers: {
+                Authorization: `Bearer ${token}`,
+            },
+        },
+    );
 
     const data = res.data.machine;
 
@@ -34,7 +36,7 @@ const regenerateConfig = async () => {
     };
 
     fs.writeFileSync(configPath, JSON.stringify(configData, null, 2));
-}
+};
 
 if (!fs.existsSync(configPath)) {
     await regenerateConfig();
@@ -49,7 +51,6 @@ try {
         },
     });
 
-
     const runner = res.data.runner;
     if (runner.id !== configData.id) {
         await regenerateConfig();
@@ -58,6 +59,5 @@ try {
     console.error(error.message);
     await regenerateConfig();
 }
-
 
 export default configData;

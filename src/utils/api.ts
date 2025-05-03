@@ -2,7 +2,7 @@ import axios from 'axios';
 import config from './init';
 
 const api = axios.create({
-    baseURL: process.env.BASE_URL + '/api',
+    baseURL: `${process.env.BASE_URL}/api`,
     headers: {
         authorization: `Bearer ${config.token}`,
     },

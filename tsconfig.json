@@ -30,8 +30,7 @@
         "emitDecoratorMetadata": true,
         "baseUrl": ".",
         "paths": {
-            "@/*": ["src/*"],
-            "@/generated/*": ["generated/*"]
+            "@/*": ["src/*"]
         }
     }
 }

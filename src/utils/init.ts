@@ -1,15 +1,63 @@
-import pc from 'picocolors';
-import { prisma } from './db';
+import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
 
-const apiKeyCount = await prisma.token.count();
-if (apiKeyCount === 0) {
-    const maxPriority = 100;
+const configPath = path.join(__dirname, '../config.json');
+const hostName = fs.readFileSync('/etc/hostname', 'utf8').replace('\n', '').trim();
 
-    const token = await prisma.token.create({
-        data: {
-            maxPriority,
+const { token, BASE_URL } = process.env;
+if (!token) {
+    throw new Error('Token not found');
+}
+if (!BASE_URL) {
+    throw new Error('BASE_URL not found');
+}
+
+
+const regenerateConfig = async () => {
+
+    const res = await axios.post(`${BASE_URL}/api/machine`, {
+        name: hostName,
+        ip: '127.0.0.1',
+    }, {
+        headers: {
+            Authorization: `Bearer ${token}`,
         },
     });
 
-    console.log(pc.green('Created initial API key:'), pc.cyan(token.token));
+    const data = res.data.machine;
+
+    const configData = {
+        id: data.id,
+        token: data.token,
+        name: hostName,
+    };
+
+    fs.writeFileSync(configPath, JSON.stringify(configData, null, 2));
 }
+
+if (!fs.existsSync(configPath)) {
+    await regenerateConfig();
+}
+
+const configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+try {
+    const res = await axios.get(`${BASE_URL}/api/runner`, {
+        headers: {
+            authorization: `Bearer ${configData.token}`,
+        },
+    });
+
+
+    const runner = res.data.runner;
+    if (runner.id !== configData.id) {
+        await regenerateConfig();
+    }
+} catch (error: any) {
+    console.error(error.message);
+    await regenerateConfig();
+}
+
+
+export default configData;

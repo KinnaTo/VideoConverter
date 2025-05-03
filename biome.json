@@ -35,7 +35,7 @@
                 "useExhaustiveDependencies": "warn"
             },
             "suspicious": {
-                "noExplicitAny": "warn",
+                "noExplicitAny": "off",
                 "noVar": "error"
             },
             "style": {

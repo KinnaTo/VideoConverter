@@ -100,6 +100,24 @@ docker logs -f video-converter
 docker stop video-converter
 ```
 
+## Windows 兼容性与运行说明
+
+1. **安装 ffmpeg**
+   - 请从 [ffmpeg 官网](https://ffmpeg.org/download.html) 下载 Windows 版本，并将 ffmpeg.exe 所在目录加入系统 PATH。
+   - 可在命令行输入 `ffmpeg -version` 验证安装。
+
+2. **GPU 编码支持（可选）**
+   - 若需使用 NVIDIA 显卡加速（NVENC），请确保已安装 NVIDIA 显卡驱动，并将 `nvidia-smi.exe` 加入 PATH。
+   - 可在命令行输入 `nvidia-smi` 验证。
+
+3. **Bun 兼容性**
+   - 本项目所有 bun 命令在 Windows 下同样适用。
+   - 推荐使用 PowerShell 或 Windows Terminal。
+
+4. **其他注意事项**
+   - 路径和文件名建议避免使用特殊字符。
+   - 如遇权限问题，请以管理员身份运行命令行。
+
 ## 规范
 
 ### 开发规范

@@ -13,7 +13,6 @@ export interface DownloadProgress {
 }
 
 export class Downloader {
-    private totalSize = 0;
     private downloadedSize = 0;
     private isDownloading = false;
     private abortController: AbortController | null = null;
@@ -63,46 +62,33 @@ export class Downloader {
                 await mkdir(dirname(this.outputPath), { recursive: true });
             }
 
-            // 获取总大小
-            const headResp = await axios.head(this.url);
-            this.totalSize = Number.parseInt(headResp.headers['content-length'], 10);
-            if (Number.isNaN(this.totalSize)) {
-                throw new Error('无法获取文件大小');
-            }
             this.downloadedSize = downloaded;
             this.lastUpdateTime = Date.now();
             this.lastDownloadedSize = downloaded;
             this.speedSamples = [];
-
-            if (this.downloadedSize >= this.totalSize) {
-                logger.info('文件已下载完成');
-                this.isDownloading = false;
-                return;
-            }
 
             // 断点续传
             const response = await axios({
                 method: 'GET',
                 url: this.url,
                 responseType: 'stream',
-                headers: {
-                    Range: `bytes=${this.downloadedSize}-`,
-                },
                 signal: this.abortController?.signal,
                 timeout: 30000,
                 decompress: true,
             });
 
+            const totalSize = Number.parseInt(response.headers['content-length'], 10);
+
             const writeStream = createWriteStream(this.outputPath, { flags: 'a' });
             response.data.on('data', (chunk: Buffer) => {
                 this.downloadedSize += chunk.length;
-                let percent = Number(((this.downloadedSize / this.totalSize) * 100).toFixed(2));
+                let percent = Number(((this.downloadedSize / totalSize) * 100).toFixed(2));
                 percent = Math.max(0, Math.min(100, percent));
                 const speed = this.calculateSpeed();
-                const eta = speed > 0 ? Math.ceil((this.totalSize - this.downloadedSize) / speed) : 0;
+                const eta = speed > 0 ? Math.ceil((totalSize - this.downloadedSize) / speed) : 0;
                 const progress: DownloadProgress = {
                     transferred: this.downloadedSize,
-                    total: this.totalSize,
+                    total: totalSize,
                     speed,
                     progress: percent,
                     eta,

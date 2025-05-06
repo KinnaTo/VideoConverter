@@ -53,7 +53,11 @@ export async function uploadFile(taskId: string, fileName: string, data: string 
         const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
         const objectName = `${taskId}/${fileName}`;
 
-        await minioClient.putObject(currentBucket, objectName, buffer, buffer.length, metadata);
+        // 使用 putObject 上传文件，MinIO 默认支持覆盖
+        await minioClient.putObject(currentBucket, objectName, buffer, buffer.length, {
+            'Content-Type': 'video/mp4',
+            ...metadata
+        });
 
         logger.info(`File uploaded successfully: ${objectName}`);
         return objectName;
@@ -61,13 +65,4 @@ export async function uploadFile(taskId: string, fileName: string, data: string 
         logger.error(`File upload failed: ${error.message}`);
         throw error;
     }
-}
-
-export async function uploadDirectory(taskId: string, dirPath: string, metadata?: Record<string, string>): Promise<string[]> {
-    if (!minioClient || !currentBucket) {
-        throw new Error('MinIO 客户端未初始化');
-    }
-
-    // TODO: 实现目录上传功能
-    return [];
 }

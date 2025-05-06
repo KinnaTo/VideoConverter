@@ -3,15 +3,15 @@
 import pc from 'picocolors';
 
 const logger = {
-    info: (msg: any) => console.log(`${pc.gray(new Date().toLocaleTimeString())} ${pc.blue('INFO')} ${msg}`),
+    info: (...args: any[]) => console.info(pc.gray(new Date().toLocaleTimeString()), pc.blue('INFO'), ...args),
 
-    warn: (msg: any) => console.warn(`${pc.gray(new Date().toLocaleTimeString())} ${pc.yellow('WARN')} ${msg}`),
+    warn: (...args: any[]) => console.warn(pc.gray(new Date().toLocaleTimeString()), pc.yellow('WARN'), ...args),
 
-    error: (msg: any) => console.error(`${pc.gray(new Date().toLocaleTimeString())} ${pc.red('ERROR')} ${msg}`),
+    error: (...args: any[]) => console.error(pc.gray(new Date().toLocaleTimeString()), pc.red('ERROR'), ...args),
 
-    debug: (msg: any) => {
+    debug: (...args: any[]) => {
         if (process.env.NODE_ENV !== 'production') {
-            console.debug(`${pc.gray(new Date().toLocaleTimeString())} ${pc.gray('DEBUG')} ${msg}`);
+            console.debug(pc.gray(new Date().toLocaleTimeString()), pc.gray('DEBUG'), ...args);
         }
     },
 

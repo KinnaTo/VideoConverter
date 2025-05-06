@@ -56,3 +56,13 @@ async function fetchAndProcessTask() {
 setInterval(fetchAndProcessTask, 1000 * 10);
 // 立即开始第一次获取
 fetchAndProcessTask();
+
+process.on('SIGINT', () => {
+    logger.info('SIGINT TERMINATED');
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    logger.info('SIGTERM TERMINATED');
+    process.exit(0);
+});

@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import axios from 'axios';
+import os from 'node:os';
 
 const configPath = path.join(__dirname, '../config.json');
-const hostName = fs.readFileSync('/etc/hostname', 'utf8').replace('\n', '').trim();
+const hostName = os.hostname();
 
 const { token, BASE_URL } = process.env;
 if (!token) {

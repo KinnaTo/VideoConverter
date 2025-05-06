@@ -1,9 +1,4 @@
-export enum TaskStatus {
-    PENDING = 'PENDING',
-    RUNNING = 'RUNNING',
-    FINISHED = 'FINISHED',
-    FAILED = 'FAILED',
-}
+import type { TaskStatus } from './task';
 
 export interface Machine {
     id: string;

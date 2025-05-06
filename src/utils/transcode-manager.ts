@@ -1,6 +1,4 @@
-import path from 'node:path';
-import * as ffmpeg from 'fluent-ffmpeg';
-import fs from 'fs-extra';
+import ffmpeg from 'fluent-ffmpeg';
 import logger from './logger';
 
 interface TranscodeOptions {
@@ -48,7 +46,7 @@ export class TranscodeManager {
         return Math.min(maxBitrate, this.options.maxBitrate);
     }
 
-    public async start(): Promise<TranscodeResult> {
+    public async start(): Promise<TranscodeResult & { ffmpegCommand?: string; ffmpegOutput?: string; stdErr?: string }> {
         if (this.process) {
             throw new Error('转码已在进行中');
         }
@@ -57,11 +55,14 @@ export class TranscodeManager {
         const duration = await this.getVideoDuration();
         logger.info(`计算得到的目标码率: ${bitrate / 1000}Kbps`);
 
+        let stdErr = '';
+
         return new Promise((resolve, reject) => {
+            let ffmpegOutput = '';
             this.process = ffmpeg(this.inputPath)
                 .outputOptions([
                     '-c:v h264_nvenc', // 使用NVENC编码器
-                    '-preset p7', // 最高质量预设
+                    '-preset slow', // 兼容性更好的预设
                     '-tune hq', // 高质量调优
                     '-rc:v vbr', // 可变比特率
                     `-b:v ${bitrate}`, // 目标比特率
@@ -75,18 +76,25 @@ export class TranscodeManager {
                     '-y', // 覆盖输出文件
                 ])
                 .size(`${this.options.width}x${this.options.height}`)
-                .on('progress', (progress: { percent: number }) => {
-                    if (!this.isCancelled) {
-                        this.onProgress?.(Math.floor(progress.percent));
-                    }
+                .on('start', (commandLine: string) => {
+                    logger.info('开始转码');
+                    logger.info(commandLine);
+                })
+                .on('progress', (progress) => {
+                    logger.info(progress);
+
+                })
+                .on('stderr', (line: string) => {
+                    logger.error(line);
+                    stdErr += line + '\n';
                 })
                 .on('end', () => {
                     this.process = null;
-                    resolve({ duration, bitrate });
+                    resolve({ duration, bitrate, ffmpegOutput, stdErr });
                 })
                 .on('error', (err: Error) => {
                     this.process = null;
-                    reject(err);
+                    reject({ error: err, ffmpegOutput, stdErr });
                 });
 
             // 开始转码

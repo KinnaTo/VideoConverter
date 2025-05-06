@@ -3,10 +3,11 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import { type ProgressType, type Task, type TaskError, type TaskProgress, type TaskResult, TaskStatus } from '../types/task';
 import api from '../utils/api';
-import { DownloadManager } from '../utils/download-manager';
+import { Downloader } from '@/utils/downloader';
 import logger from '../utils/logger';
 import { initMinio, uploadFile } from '../utils/minio';
 import { TranscodeManager } from '../utils/transcode-manager';
+import pRetry from 'p-retry';
 
 interface TranscodeResult {
     outputPath: string;
@@ -30,6 +31,7 @@ class TaskManager {
     private currentProcessingTask: string | null = null;
     private isProcessing = false;
     private tempDir: string;
+    private lastProgressSent: Map<string, number> = new Map();
 
     constructor() {
         this.tempDir = path.join(os.tmpdir(), 'video-processor');
@@ -37,6 +39,13 @@ class TaskManager {
     }
 
     private async updateProgress(taskId: string, progressData: TaskProgress) {
+        const now = Date.now();
+        const lastSent = this.lastProgressSent.get(taskId) || 0;
+        if (now - lastSent < 5000 && progressData.progress < 100) {
+            // 5秒内只允许发送一次，100%进度除外
+            return;
+        }
+        this.lastProgressSent.set(taskId, now);
         try {
             logger.debug(`[任务 ${taskId}] 发送进度更新: ${JSON.stringify(progressData)}`);
             await api.post(`/runner/${taskId}/progress`, { data: progressData });
@@ -180,7 +189,7 @@ class TaskManager {
 
             logger.info(`[任务 ${task.id}] 开始下载文件: ${task.source}`);
             await this.updateTaskStatus(task.id, TaskStatus.DOWNLOADING);
-            const downloader = new DownloadManager(task.source, downloadPath, (progress) => {
+            const downloader = new Downloader(task.source, downloadPath, (progress) => {
                 const progressData: TaskProgress = {
                     type: 'download',
                     progress: progress.progress,
@@ -192,8 +201,7 @@ class TaskManager {
                 this.updateProgress(task.id, progressData);
             });
 
-            logger.info(`[任务 ${task.id}] 创建下载管理器，准备开始下载`);
-            await downloader.start();
+            await pRetry(() => downloader.start(), { retries: 1 });
             logger.info(`[任务 ${task.id}] 下载完成`);
 
             // 转码文件
@@ -251,8 +259,8 @@ class TaskManager {
             await this.startBackgroundUpload(task, transcodePath, transcodeResult);
 
             // 清理临时文件
-            await fs.remove(downloadPath);
-            await fs.remove(transcodePath);
+            // await fs.remove(downloadPath);
+            // await fs.remove(transcodePath);
 
             // 处理完成后，重置状态
             this.currentProcessingTask = null;
@@ -273,10 +281,11 @@ class TaskManager {
 
             logger.error(`[任务 ${task.id}] 处理失败: ${JSON.stringify(errorDetails)}`);
             await this.updateTaskStatus(task.id, TaskStatus.FAILED, 0, JSON.stringify(errorDetails));
+            await api.post(`/runner/${task.id}/fail`, { error: JSON.stringify(errorDetails) });
 
             // 清理临时文件
-            await fs.remove(downloadPath);
-            await fs.remove(transcodePath);
+            // await fs.remove(downloadPath);
+            // await fs.remove(transcodePath);
 
             // 发生错误时也要重置状态
             this.currentProcessingTask = null;

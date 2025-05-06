@@ -1,233 +1,129 @@
 import { createWriteStream, existsSync, statSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
+import { mkdir } from 'node:fs/promises';
 import logger from './logger';
+import axios from 'axios';
 
-interface DownloadChunk {
-    start: number;
-    end: number;
-    downloaded: number;
-    completed: boolean;
+export interface DownloadProgress {
+    transferred: number;
+    total: number;
+    speed: number;
+    progress: number;
+    eta: number;
 }
 
-interface DownloadState {
-    url: string;
-    fileSize: number;
-    chunks: DownloadChunk[];
-    tempDir: string;
-    attempts: number;
-}
+export class Downloader {
+    private totalSize = 0;
+    private downloadedSize = 0;
+    private isDownloading = false;
+    private abortController: AbortController | null = null;
+    private lastUpdateTime = 0;
+    private lastDownloadedSize = 0;
+    private speedSamples: number[] = [];
 
-const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
-const MAX_CONCURRENT_CHUNKS = 3; // 同时下载的分片数
-const MAX_RETRIES = 3; // 最大重试次数
-const RETRY_DELAY = 1000; // 重试延迟（毫秒）
-
-export async function download(url: string, outputPath: string, onProgress?: (progress: number) => void): Promise<void> {
-    try {
-        // 创建临时目录
-        const tempDir = join(dirname(outputPath), '.temp', Buffer.from(url).toString('base64').slice(0, 32));
-        await mkdir(tempDir, { recursive: true });
-
-        // 尝试加载已有的下载状态
-        const statePath = join(tempDir, 'state.json');
-        let state: DownloadState | undefined;
-
-        if (existsSync(statePath)) {
-            try {
-                const stateData = await readFile(statePath, 'utf-8');
-                const loadedState = JSON.parse(stateData) as DownloadState;
-                if (loadedState.url === url) {
-                    state = loadedState;
-                }
-            } catch (error) {
-                logger.warn(`Failed to load download state: ${error}`);
-            }
-        }
-
-        // 如果没有状态或状态无效，创建新的状态
-        if (!state) {
-            const response = await fetch(url, { method: 'HEAD' });
-            if (!response.ok) {
-                throw new Error(`Failed to get file size: ${response.statusText}`);
-            }
-
-            const fileSize = Number.parseInt(response.headers.get('content-length') || '0', 10);
-            if (!fileSize) {
-                throw new Error('Invalid file size');
-            }
-
-            // 计算分片
-            const chunks: DownloadChunk[] = [];
-            for (let start = 0; start < fileSize; start += CHUNK_SIZE) {
-                const end = Math.min(start + CHUNK_SIZE - 1, fileSize - 1);
-                chunks.push({
-                    start,
-                    end,
-                    downloaded: 0,
-                    completed: false,
-                });
-            }
-
-            state = {
-                url,
-                fileSize,
-                chunks,
-                tempDir,
-                attempts: 0,
-            };
-        }
-
-        // 保存状态
-        await saveState(state, statePath);
-
-        // 开始下载
-        let isDownloading = true;
-        const updateProgressInterval = setInterval(() => {
-            if (isDownloading && state) {
-                const progress = calculateProgress(state);
-                onProgress?.(progress);
-            }
-        }, 1000);
-
-        try {
-            await downloadChunks(state, onProgress);
-
-            // 合并文件
-            await mergeChunks(state, outputPath);
-
-            // 清理临时文件
-            // await rm(tempDir, { recursive: true, force: true });
-
-            logger.info(`Download completed: ${outputPath}`);
-        } finally {
-            isDownloading = false;
-            clearInterval(updateProgressInterval);
-        }
-    } catch (error) {
-        logger.error(`Download failed: ${error}`);
-        throw error;
+    constructor(
+        private url: string,
+        private outputPath: string,
+        private onProgress?: (progress: DownloadProgress) => void,
+    ) {
+        this.abortController = new AbortController();
     }
-}
 
-async function downloadChunks(state: DownloadState, onProgress?: (progress: number) => void): Promise<void> {
-    const { chunks } = state;
-    const incompletedChunks = chunks.filter((chunk) => !chunk.completed);
-
-    // 分批下载
-    for (let i = 0; i < incompletedChunks.length; i += MAX_CONCURRENT_CHUNKS) {
-        const batch = incompletedChunks.slice(i, i + MAX_CONCURRENT_CHUNKS);
-        await Promise.all(batch.map((chunk) => downloadChunk(state, chunk)));
-
-        // 更新进度
-        const progress = calculateProgress(state);
-        onProgress?.(progress);
-
-        // 保存状态
-        await saveState(state, join(state.tempDir, 'state.json'));
+    private calculateSpeed(): number {
+        const now = Date.now();
+        const timeDiff = (now - this.lastUpdateTime) / 1000;
+        const sizeDiff = this.downloadedSize - this.lastDownloadedSize;
+        if (timeDiff > 0) {
+            const currentSpeed = sizeDiff / timeDiff;
+            this.speedSamples.push(currentSpeed);
+            if (this.speedSamples.length > 5) {
+                this.speedSamples.shift();
+            }
+            const avgSpeed = this.speedSamples.reduce((a, b) => a + b, 0) / this.speedSamples.length;
+            this.lastUpdateTime = now;
+            this.lastDownloadedSize = this.downloadedSize;
+            return avgSpeed;
+        }
+        return 0;
     }
-}
 
-async function downloadChunk(state: DownloadState, chunk: DownloadChunk): Promise<void> {
-    const chunkPath = join(state.tempDir, `chunk_${chunk.start}`);
-    let attempts = 0;
-
-    while (attempts < MAX_RETRIES) {
+    public async start(): Promise<void> {
+        if (this.isDownloading) {
+            throw new Error('Download already in progress');
+        }
+        this.isDownloading = true;
+        logger.info(`开始下载: ${this.url} 到 ${this.outputPath}`);
         try {
-            // 如果分片文件已存在且大小正确，跳过下载
-            if (existsSync(chunkPath)) {
-                const stats = statSync(chunkPath);
-                if (stats.size === chunk.end - chunk.start + 1) {
-                    chunk.downloaded = stats.size;
-                    chunk.completed = true;
-                    return;
-                }
-            }
-
-            const response = await fetch(state.url, {
-                headers: {
-                    Range: `bytes=${chunk.start + chunk.downloaded}-${chunk.end}`,
-                },
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            if (!response.body) {
-                throw new Error('No response body');
-            }
-
-            const fileStream = createWriteStream(chunkPath, { flags: 'a' });
-            const reader = response.body.getReader();
-
-            try {
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-
-                    chunk.downloaded += value.length;
-                    await new Promise<void>((resolve, reject) => {
-                        fileStream.write(value, (error: Error | null | undefined) => {
-                            if (error) reject(error);
-                            else resolve();
-                        });
-                    });
-                }
-            } finally {
-                reader.releaseLock();
-                await new Promise<void>((resolve, reject) => {
-                    fileStream.end((error: Error | null | undefined) => {
-                        if (error) reject(error);
-                        else resolve();
-                    });
-                });
-            }
-
-            chunk.completed = true;
-            return;
-        } catch (error) {
-            attempts++;
-            logger.warn(`Chunk download failed (attempt ${attempts}): ${error}`);
-            if (attempts < MAX_RETRIES) {
-                await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
+            // 检查已下载部分
+            let downloaded = 0;
+            if (existsSync(this.outputPath)) {
+                downloaded = statSync(this.outputPath).size;
             } else {
-                throw error;
+                // 确保目录存在
+                await mkdir(dirname(this.outputPath), { recursive: true });
             }
-        }
-    }
-}
 
-async function mergeChunks(state: DownloadState, outputPath: string): Promise<void> {
-    const { chunks } = state;
-    const outputStream = createWriteStream(outputPath);
+            // 获取总大小
+            const headResp = await axios.head(this.url);
+            this.totalSize = Number.parseInt(headResp.headers['content-length'], 10);
+            if (Number.isNaN(this.totalSize)) {
+                throw new Error('无法获取文件大小');
+            }
+            this.downloadedSize = downloaded;
+            this.lastUpdateTime = Date.now();
+            this.lastDownloadedSize = downloaded;
+            this.speedSamples = [];
 
-    try {
-        for (const chunk of chunks) {
-            const chunkPath = join(state.tempDir, `chunk_${chunk.start}`);
-            const chunkData = await readFile(chunkPath);
+            if (this.downloadedSize >= this.totalSize) {
+                logger.info('文件已下载完成');
+                this.isDownloading = false;
+                return;
+            }
+
+            // 断点续传
+            const response = await axios({
+                method: 'GET',
+                url: this.url,
+                responseType: 'stream',
+                headers: {
+                    Range: `bytes=${this.downloadedSize}-`,
+                },
+                signal: this.abortController?.signal,
+                timeout: 30000,
+                decompress: true,
+            });
+
+            const writeStream = createWriteStream(this.outputPath, { flags: 'a' });
+            response.data.on('data', (chunk: Buffer) => {
+                this.downloadedSize += chunk.length;
+                let percent = Number(((this.downloadedSize / this.totalSize) * 100).toFixed(2));
+                percent = Math.max(0, Math.min(100, percent));
+                const speed = this.calculateSpeed();
+                const eta = speed > 0 ? Math.ceil((this.totalSize - this.downloadedSize) / speed) : 0;
+                const progress: DownloadProgress = {
+                    transferred: this.downloadedSize,
+                    total: this.totalSize,
+                    speed,
+                    progress: percent,
+                    eta,
+                };
+                this.onProgress?.(progress);
+            });
             await new Promise<void>((resolve, reject) => {
-                outputStream.write(chunkData, (error: Error | null | undefined) => {
-                    if (error) reject(error);
-                    else resolve();
-                });
+                response.data.pipe(writeStream);
+                writeStream.on('finish', resolve);
+                writeStream.on('error', reject);
+                response.data.on('error', reject);
             });
+        } finally {
+            this.isDownloading = false;
         }
-    } finally {
-        await new Promise<void>((resolve, reject) => {
-            outputStream.end((error: Error | null | undefined) => {
-                if (error) reject(error);
-                else resolve();
-            });
-        });
     }
-}
 
-async function saveState(state: DownloadState, statePath: string): Promise<void> {
-    await writeFile(statePath, JSON.stringify(state, null, 2));
-}
-
-function calculateProgress(state: DownloadState): number {
-    const totalDownloaded = state.chunks.reduce((sum, chunk) => sum + chunk.downloaded, 0);
-    return Math.round((totalDownloaded / state.fileSize) * 100);
+    public stop(): void {
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = new AbortController();
+        }
+    }
 }

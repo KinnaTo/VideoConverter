@@ -4,9 +4,8 @@ export interface Machine {
     id: string;
     name: string;
     token: string;
-    firstHeartbeat?: Date;
-    heartbeat?: Date;
-    status: string;
+    status: 'online' | 'offline' | 'error';
+    lastHeartbeat?: Date;
 }
 
 export interface Task {
@@ -14,28 +13,22 @@ export interface Task {
     queueId: string;
     status: TaskStatus;
     priority: number;
-    result?: any;
-    error?: string;
-    progress?: number;
-    createdAt: Date;
-    updatedAt: Date;
-    startedAt?: Date;
-    finishedAt?: Date;
-    runnerId?: string;
+    source: string;
+    createTime: Date;
+    updateTime: Date;
 }
 
 export interface Queue {
     id: string;
     name: string;
-    createdAt: Date;
-    updatedAt: Date;
+    priority: number;
 }
 
 export interface RunnerConfig {
-    apiUrl: string;
-    token: string;
     machineId: string;
-    heartbeatInterval: number;
-    taskCheckInterval: number;
+    token: string;
+    apiUrl: string;
     downloadDir: string;
+    heartbeatInterval: number; // 毫秒
+    taskCheckInterval: number; // 毫秒
 }

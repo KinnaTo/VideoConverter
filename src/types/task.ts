@@ -1,3 +1,5 @@
+import type { ConvertParams, ConvertParams as FullConvertParams } from './convert-params';
+
 export enum TaskStatus {
     WAITING = 'WAITING',
     DOWNLOADING = 'DOWNLOADING',
@@ -22,10 +24,7 @@ export interface DownloadInfo {
     fileSize?: number;
     averageSpeed?: number;
     sourceUrl: string;
-    hash?: string;
 
-    // 运行时状态（处理完成后会被清除）
-    status?: 'downloading' | 'completed' | 'failed';
     progress?: number;
     currentSize?: number;
     totalSize?: number;
@@ -49,9 +48,8 @@ export interface ConvertInfo {
     fps?: number;
     averageSpeed?: number;
     preset?: string;
+    params?: FullConvertParams;
 
-    // 运行时状态（处理完成后会被清除）
-    status?: 'converting' | 'completed' | 'failed';
     progress?: number;
     currentFrame?: number;
     currentFps?: number;
@@ -69,8 +67,6 @@ export interface UploadInfo {
     targetUrl: string;
     hash?: string;
 
-    // 运行时状态（处理完成后会被清除）
-    status?: 'uploading' | 'completed' | 'failed';
     progress?: number;
     currentSize?: number;
     totalSize?: number;
@@ -95,12 +91,13 @@ export interface TaskError {
         transcodePath?: string;
     };
     uploadError?: boolean;
-}
 
+}
 export interface Task {
     id: string;
     status: TaskStatus;
     source: string;
+    convertParams: ConvertParams;
     downloadInfo?: DownloadInfo;
     convertInfo?: ConvertInfo;
     uploadInfo?: UploadInfo;

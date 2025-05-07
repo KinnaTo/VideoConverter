@@ -1,10 +1,11 @@
-import { taskManager } from './services/task-manager';
-import type { Task } from './types/task';
-import api from './utils/api';
+import 'reflect-metadata';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import config from './utils/init';
 import logger from './utils/logger';
 import { getSystemInfo } from './utils/system-info';
 
+// 环境变量检查
 const { BASE_URL, HOSTNAME, ENCODER } = process.env;
 
 if (!BASE_URL || !HOSTNAME || !ENCODER) {
@@ -12,57 +13,52 @@ if (!BASE_URL || !HOSTNAME || !ENCODER) {
     process.exit(1);
 }
 
-try {
-    await api.post('/runner/online', { id: config.id });
-    logger.info('Runner 已上线');
-} catch (error: any) {
-    logger.error(`${error.message}`);
-}
+// 创建必要的目录
+const downloadDir = join(process.cwd(), 'downloads');
+const tempDir = join(process.cwd(), 'temp');
 
-const heartbeat = async () => {
-    try {
-        const { systemInfo: deviceInfo, encoder } = await getSystemInfo();
-        await api.post('/runner/heartbeat', {
-            id: config.id,
-            deviceInfo,
-            encoder: encoder,
-        });
-    } catch (error: any) {
-        logger.error(`Heartbeat failed: ${error.message}${error.response?.data ? ` - ${JSON.stringify(error.response.data)}` : ''}`);
-    }
+// 初始化 RunnerService 配置
+const runnerConfig = {
+    machineId: config.id,
+    token: config.token,
+    apiUrl: BASE_URL,
+    downloadDir,
+    heartbeatInterval: 1000 * 20, // 20秒心跳
+    taskCheckInterval: 1000 * 10  // 10秒检查一次任务
 };
 
-heartbeat();
-setInterval(heartbeat, 1000 * 20);
-
-async function fetchAndProcessTask() {
-    logger.info('尝试获取新任务...');
+async function main() {
     try {
-        const taskRes = await api.get<{ task?: Task; message?: string }>('/runner/getTask');
-
-        if (taskRes.data.task) {
-            const newTask = taskRes.data.task;
-            logger.info(`获取到新任务: ${newTask.id}`);
-            await taskManager.addTask(newTask);
-        } else {
-            logger.info('当前无可用任务.');
+        // 确保目录存在
+        await mkdir(downloadDir, { recursive: true });
+        await mkdir(tempDir, { recursive: true });
+        // 上线通知
+        try {
+            const { systemInfo, encoder } = await getSystemInfo();
+            logger.info(`系统信息: CPU: ${systemInfo.cpu.brand}, 核心数: ${systemInfo.cpu.cores}, 编码器: ${encoder}`);
+        } catch (error: any) {
+            logger.error(`上线通知失败: ${error.message}`);
         }
+
     } catch (error: any) {
-        logger.error(`获取任务失败: ${error.message}${error.response?.data ? ` - ${JSON.stringify(error.response.data)}` : ''}`);
+        logger.error(`启动失败: ${error.message}`);
+        process.exit(1);
     }
 }
 
-// 每10秒尝试获取新任务
-setInterval(fetchAndProcessTask, 1000 * 10);
-// 立即开始第一次获取
-fetchAndProcessTask();
+// 启动主程序
+main().catch(error => {
+    logger.error('未捕获的错误:', error);
+    process.exit(1);
+});
 
-process.on('SIGINT', () => {
-    logger.info('SIGINT TERMINATED');
+// 处理进程终止信号
+process.on('SIGINT', async () => {
+    logger.info('接收到 SIGINT 信号，正在关闭...');
     process.exit(0);
 });
 
-process.on('SIGTERM', () => {
-    logger.info('SIGTERM TERMINATED');
+process.on('SIGTERM', async () => {
+    logger.info('接收到 SIGTERM 信号，正在关闭...');
     process.exit(0);
 });

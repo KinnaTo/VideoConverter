@@ -1,146 +1,143 @@
+import { TaskProcessor } from '@/core/TaskState';
+import { TaskQueue } from '@/core/TaskQueue';
 import api from '@/utils/api';
-import Downloader from './downloader';
-import Converter from './converter';
-import Uploader from './uploader';
-import type { MinioConfig } from '@/types/task';
+import type { Task } from '@/types/task';
+import { TaskStatus } from '@/types/task';
 import os from 'os';
 import path from 'path';
+import logger from '@/utils/logger';
 
-interface Task {
-    id: string;
-    url: string;
-    // 其他任务相关字段
-}
+// 创建临时目录常量
+const TMP_DIR = path.join(os.tmpdir(), 'videoconverter');
 
 export default class TaskManager {
-    private downloadQueue: Task[] = [];
-    private convertingTask: Task | null = null;
-    private uploadingTask: Task | null = null;
-    private isDownloading = false;
-    private isConverting = false;
-    private isUploading = false;
+    private taskQueue: TaskQueue;
+    private taskProcessor: TaskProcessor;
     private running = false;
-    private workDir: string;
+    private taskCheckTimer?: NodeJS.Timer;
 
     constructor(workDir?: string) {
-        this.workDir = workDir || os.tmpdir();
+        const workDirectory = workDir || TMP_DIR;
+
+        // 初始化任务队列和处理器
+        this.taskQueue = new TaskQueue(1); // 最多同时处理1个任务
+        this.taskProcessor = new TaskProcessor(workDirectory, api);
+
+        // 设置事件监听
+        this.setupEventListeners();
+
+        logger.info(`TaskManager initialized with work directory: ${workDirectory}`);
+    }
+
+    /**
+     * 设置事件监听
+     */
+    private setupEventListeners() {
+        // 任务完成事件
+        this.taskProcessor.on('complete', (task: Task) => {
+            logger.info(`Task ${task.id} completed successfully`);
+            this.taskQueue.complete(task.id);
+        });
+
+        // 任务错误事件
+        this.taskProcessor.on('error', ({ task, error }: { task: Task, error: Error }) => {
+            logger.error(`Task ${task.id} failed: ${error.message}`);
+            this.taskQueue.fail(task.id, error);
+        });
+
+        // 任务状态变更事件
+        this.taskProcessor.on('stateChange', (state: string) => {
+            logger.info(`Task state changed to: ${state}`);
+        });
+
+        // 任务进度事件
+        this.taskProcessor.on('progress', ({ stage, info }: { stage: string, info: any }) => {
+            logger.debug(`${stage} progress: ${info.progress?.toFixed(2)}%`);
+        });
     }
 
     async start() {
         this.running = true;
+
+        // 设置任务检查定时器
+        this.taskCheckTimer = setInterval(() => {
+            this.checkAndFetchNewTask();
+        }, 5000);
+
+        logger.info('TaskManager started');
+
+        // 开始处理任务循环
+        this.processTaskLoop();
+    }
+
+    async stop() {
+        this.running = false;
+        if (this.taskCheckTimer) {
+            clearInterval(this.taskCheckTimer);
+        }
+        logger.info('TaskManager stopped');
+    }
+
+    private async processTaskLoop() {
         while (this.running) {
-            // 下载阶段，最多允许1个正在下载，1个已下载待转换
-            if (!this.isDownloading && this.downloadQueue.length < 2) {
-                const task = await this.getTask();
-                if (task) this.downloadTask(task);
+            try {
+                // 从队列中获取下一个任务
+                const task = await this.taskQueue.next();
+                if (task) {
+                    // 使用任务处理器处理任务
+                    await this.taskProcessor.process(task);
+                }
+            } catch (error) {
+                logger.error(`Task processing error: ${error instanceof Error ? error.message : String(error)}`);
             }
 
-            // 转换阶段
-            if (!this.isConverting && this.downloadQueue.length > 0) {
-                const task = this.downloadQueue.shift();
-                if (task) this.convertTask(task);
-            }
-
-            // 上传阶段
-            if (!this.isUploading && this.uploadingTask) {
-                this.uploadTask(this.uploadingTask);
-            }
-
+            // 避免CPU过度使用
             await this.sleep(500);
+        }
+    }
+
+    private async checkAndFetchNewTask() {
+        // 如果队列已满或没有空闲容量，则不获取新任务
+        if (!this.taskQueue.hasCapacity()) {
+            return;
+        }
+
+        try {
+            // 获取新任务
+            const task = await this.getTask();
+            if (task) {
+                this.taskQueue.add(task);
+                logger.info(`Added task ${task.id} to queue`);
+            }
+        } catch (error) {
+            logger.error(`Failed to check task: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 
     async getTask(): Promise<Task | null> {
         try {
             const res = await api.get('/runner/getTask');
+            const task = res?.data?.task;
 
-
+            if (task) {
+                // 确保任务有状态值
+                return {
+                    ...task,
+                    status: task.status || TaskStatus.WAITING
+                };
+            }
         } catch (error) {
-            console.error('获取任务失败', error);
+            logger.error('获取任务失败', error);
         }
         return null;
     }
 
-    async downloadTask(task: Task) {
-        this.isDownloading = true;
-        // TODO: 下载路径和进度回调
-        const downloadPath = path.join(this.workDir, `${task.id}`);
-        const downloader = new Downloader(task.url, downloadPath);
-        await downloader.download(info => {
-            api.post(`/runner/${task.id}/download`, { downloadInfo: info });
-        });
-        await api.post(`/runner/${task.id}/download`, { downloadInfo: downloader.downloadInfo });
-        this.downloadQueue.push(task);
-        this.isDownloading = false;
-    }
-
-    async convertTask(task: Task) {
-        this.isConverting = true;
-        // TODO: 调用Converter进行转换
-        const downloadPath = path.join(this.workDir, `${task.id}`);
-        const outputPath = path.join(this.workDir, `${task.id}.mp4`);
-        const converter = new Converter(downloadPath, outputPath);
-        await converter.convert(info => {
-            api.post(`/runner/${task.id}/convert`, { convertInfo: info });
-        });
-        await api.post(`/runner/${task.id}/convert`, { convertInfo: converter.convertInfo });
-        this.uploadingTask = task;
-        this.isConverting = false;
-    }
-
-    async uploadTask(task: Task) {
-        this.isUploading = true;
-        // 获取minio配置
-        const { data: minioConfig } = await api.get('/runner/minio');
-        const uploader = new Uploader(minioConfig as MinioConfig);
-        const outputPath = path.join(this.workDir, `${task.id}.mp4`);
-        await uploader.upload(outputPath, task.id, 'mp4', info => {
-            api.post(`/runner/${task.id}/upload`, { uploadInfo: info });
-        });
-        await api.post(`/runner/${task.id}/upload`, { uploadInfo: uploader.uploadInfo });
-        this.isUploading = false;
-    }
-
+    // 这个方法保留用于直接处理单个任务，但内部使用TaskProcessor
     async processTask(task: Task) {
         try {
-            // 1. 标记任务开始
-            await api.post(`/runner/${task.id}/start`);
-
-            // 2. 下载
-            const downloadPath = path.join(this.workDir, `${task.id}`);
-            const downloader = new Downloader(task.url, downloadPath);
-            await downloader.download(info => {
-                api.post(`/runner/${task.id}/download`, { downloadInfo: info });
-            });
-            await api.post(`/runner/${task.id}/download`, { downloadInfo: downloader.downloadInfo });
-
-            // 3. 转换
-            const outputPath = path.join(this.workDir, `${task.id}.mp4`);
-            const converter = new Converter(downloadPath, outputPath);
-            await converter.convert(info => {
-                api.post(`/runner/${task.id}/convert`, { convertInfo: info });
-            });
-            await api.post(`/runner/${task.id}/convert`, { convertInfo: converter.convertInfo });
-
-            // 4. 获取minio配置
-            const { data: minioConfig } = await api.get('/runner/minio');
-            const uploader = new Uploader(minioConfig as MinioConfig);
-
-            // 5. 上传
-            await uploader.upload(outputPath, task.id, 'mp4', info => {
-                api.post(`/runner/${task.id}/upload`, { uploadInfo: info });
-            });
-            await api.post(`/runner/${task.id}/upload`, { uploadInfo: uploader.uploadInfo });
-
-            // 6. 标记完成
-            await api.post(`/runner/${task.id}/complete`, {
-                result: {
-                    status: 'success',
-                    path: uploader.uploadInfo?.targetUrl,
-                }
-            });
+            await this.taskProcessor.process(task);
         } catch (error) {
-            await api.post(`/runner/${task.id}/fail`, { error: String(error) });
+            logger.error(`Failed to process task ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 

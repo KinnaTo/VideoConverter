@@ -7,6 +7,7 @@ export enum TaskStatus {
     UPLOADING = 'UPLOADING',
     FINISHED = 'FINISHED',
     FAILED = 'FAILED',
+    PAUSED = 'PAUSED'
 }
 
 export interface MinioConfig {
@@ -24,6 +25,7 @@ export interface DownloadInfo {
     fileSize?: number;
     averageSpeed?: number;
     sourceUrl: string;
+    filePath?: string;
 
     progress?: number;
     currentSize?: number;

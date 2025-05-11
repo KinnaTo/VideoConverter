@@ -1,143 +1,144 @@
-# Video Convert Queue
+# VConverter
 
-## 工具链
+视频转换服务，支持下载、转换和上传视频文件。
 
-[![Bun](https://img.shields.io/badge/bun-black?style=for-the-badge&logo=bun&logoColor=white)](https://bun.sh/)
-[![TypeScript](https://img.shields.io/badge/typescript-%23007ACC.svg?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Biome](https://img.shields.io/badge/biome-60A5FA?style=for-the-badge&logo=biome&logoColor=white)](https://biomejs.dev/)
-[![Prisma](https://img.shields.io/badge/Prisma-16A394?style=for-the-badge&logo=Prisma&logoColor=white)](https://www.prisma.io/)
-[![Commitizen](https://img.shields.io/badge/commitizen-143157?style=for-the-badge&logo=git&logoColor=white)](https://github.com/commitizen/czg)
-[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
-[![NVIDIA](https://img.shields.io/badge/NVIDIA-%2376B900.svg?style=for-the-badge&logo=nvidia&logoColor=white)](https://www.nvidia.com/)
+## 项目结构
 
-## 开始运行
-
-### 本地运行
-
-```bash
-bun install
-bun db:generate
-bun db:migrate
-bun run dev
+```
+src/
+  ├── core/            # 核心架构
+  │   ├── TaskState.ts   # 任务状态接口和处理器
+  │   ├── TaskStates.ts  # 具体任务状态实现
+  │   └── TaskQueue.ts   # 任务队列管理
+  ├── services/        # 服务
+  │   └── runner.ts      # 运行器服务
+  ├── task/            # 任务相关
+  │   ├── converter.ts   # 视频转换
+  │   ├── downloader.ts  # 文件下载
+  │   ├── manager.ts     # 任务管理
+  │   └── uploader.ts    # 文件上传
+  ├── types/           # 类型定义
+  │   ├── convert-params.ts  # 转换参数
+  │   ├── runner.ts     # 运行器类型
+  │   └── task.ts       # 任务类型
+  └── utils/           # 工具
+      ├── api.ts         # API客户端
+      ├── logger.ts      # 日志工具
+      └── system-info.ts # 系统信息
 ```
 
-### Docker运行
+## 架构设计
 
-确保你的系统已安装：
-- [Docker](https://www.docker.com/)
-- [Docker Compose](https://docs.docker.com/compose/)
-- [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit)
+### 核心架构
 
-#### 使用 Docker Compose（推荐）
+- **TaskProcessor**: 负责单个任务的生命周期管理
+- **TaskQueue**: 管理任务队列和并发执行
+- **TaskState**: 使用状态模式管理任务状态
 
-1. 创建环境配置文件：
+### 状态模式
 
-```bash
-cp .env.example .env
+任务处理被分为以下状态：
+
+1. **WaitingState**: 任务等待处理
+2. **DownloadingState**: 下载阶段
+3. **ConvertingState**: 转换阶段
+4. **UploadingState**: 上传阶段
+5. **CompleteState**: 完成阶段
+6. **FailedState**: 失败处理
+
+### 事件驱动
+
+使用 EventEmitter 实现进度通知和事件处理：
+
+- `progress`: 进度更新
+- `stateChange`: 状态变更
+- `complete`: 任务完成
+- `error`: 错误发生
+
+## 最近重构
+
+### 问题
+
+1. runner.ts 和 task/manager.ts 存在大量重复代码
+2. 文件处理和错误处理不够健壮
+3. 代码职责不清晰
+
+### 改进
+
+1. **统一架构**
+
+   - 使用 TaskProcessor 作为任务处理的核心
+   - 使用 TaskQueue 管理任务队列
+   - 删除 manager.ts 中的重复代码
+
+2. **文件处理改进**
+
+   - 修复 Downloader 将路径创建为目录的问题
+   - 修复 Converter 将输出路径创建为目录的问题
+   - 统一使用 os.tmpdir()/videoconverter 作为临时目录
+   - 为每个任务创建单独的子目录
+   - 添加文件清理机制
+
+3. **API 调用改进**
+
+   - 统一使用 axios 进行 API 调用
+   - 确保 API 路径和响应数据结构一致
+
+4. **错误处理改进**
+
+   - 每个状态都有专门的错误处理
+   - 详细的错误日志记录
+   - 统一的错误报告机制
+
+5. **进度通知改进**
+   - 使用 EventEmitter 实现统一的进度通知
+   - 标准化进度事件格式
+
+## 使用方法
+
+### 作为服务运行
+
+```typescript
+import { RunnerService } from "./services/runner";
+
+const runner = new RunnerService({
+  machineId: "unique-machine-id",
+  token: "api-token",
+  apiUrl: "https://api.example.com",
+  downloadDir: "/tmp/downloads",
+  heartbeatInterval: 30000,
+  taskCheckInterval: 5000,
+});
+
+runner.start();
 ```
 
-2. 编辑 `.env` 文件，设置必要的环境变量：
+### 处理单个任务
 
-```env
-POSTGRES_PASSWORD=your_password
-POSTGRES_DB=video_converter
+```typescript
+import { TaskProcessor } from "./core/TaskState";
+import api from "./utils/api";
+
+const processor = new TaskProcessor("/tmp/workdir", api);
+await processor.process({
+  id: "task-id",
+  status: TaskStatus.WAITING,
+  source: "https://example.com/video.mp4",
+  convertParams: {
+    codec: "h264_nvenc",
+    audioCodec: "aac",
+    preset: "fast",
+    resolution: "1080p",
+  },
+});
 ```
 
-3. 启动所有服务：
+## 配置
 
-```bash
-docker compose up -d
-```
+环境变量配置：
 
-4. 查看服务状态：
-
-```bash
-docker compose ps
-```
-
-5. 查看服务日志：
-
-```bash
-# 查看所有服务日志
-docker compose logs -f
-
-# 查看特定服务日志
-docker compose logs -f app
-```
-
-6. 停止所有服务：
-
-```bash
-docker compose down
-```
-
-#### 使用单独的Docker容器
-
-1. 构建Docker镜像：
-
-```bash
-docker build -t video-converter .
-```
-
-2. 运行容器：
-
-```bash
-docker run --gpus all -d \
-  -p 3000:3000 \
-  --name video-converter \
-  video-converter
-```
-
-3. 查看容器日志：
-
-```bash
-docker logs -f video-converter
-```
-
-4. 停止容器：
-
-```bash
-docker stop video-converter
-```
-
-## Windows 兼容性与运行说明
-
-1. **安装 ffmpeg**
-   - 请从 [ffmpeg 官网](https://ffmpeg.org/download.html) 下载 Windows 版本，并将 ffmpeg.exe 所在目录加入系统 PATH。
-   - 可在命令行输入 `ffmpeg -version` 验证安装。
-
-2. **GPU 编码支持（可选）**
-   - 若需使用 NVIDIA 显卡加速（NVENC），请确保已安装 NVIDIA 显卡驱动，并将 `nvidia-smi.exe` 加入 PATH。
-   - 可在命令行输入 `nvidia-smi` 验证。
-
-3. **Bun 兼容性**
-   - 本项目所有 bun 命令在 Windows 下同样适用。
-   - 推荐使用 PowerShell 或 Windows Terminal。
-
-4. **其他注意事项**
-   - 路径和文件名建议避免使用特殊字符。
-   - 如遇权限问题，请以管理员身份运行命令行。
-
-## 规范
-
-### 开发规范
-
-使用 [Biome](https://biomejs.dev/) 进行代码格式化和质量检查：
-
-```bash
-bun check
-```
-
-### 提交规范
-
-生成 `.env.example` 文件：
-
-```bash
-bun run scripts/generate-env.ts
-```
-
-使用 [czg](https://github.com/commitizen/czg) 生成提交信息：
-
-```bash
-bun czg
-```
+- `API_URL`: API 服务器 URL
+- `MACHINE_ID`: 机器 ID
+- `API_TOKEN`: API 认证令牌
+- `WORK_DIR`: 工作目录（默认为系统临时目录）
+- `MAX_CONCURRENT`: 最大并发任务数（默认为 1）

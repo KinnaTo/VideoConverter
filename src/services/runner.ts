@@ -11,17 +11,13 @@ import { TaskQueue, TaskStage } from '@/core/TaskQueue';
 import api from '@/utils/api';
 import { TaskStatus } from '@/types/task';
 import type { AxiosInstance } from 'axios';
+import { formatErrorMessage } from '@/utils/error-handler';
+import { TaskStateManager } from '@/core/TaskStateManager';
 
 // 创建临时目录常量
 const TMP_DIR = join(os.tmpdir(), 'videoconverter');
 
-/**
- * 任务状态数据接口
- */
-interface TaskStateData {
-    downloadedFilePath?: string;
-    convertedFilePath?: string;
-}
+// 使用TaskStateManager替代原有的TaskStateData接口
 
 /**
  * 将Runner的Task类型转换为Processor的Task类型
@@ -56,8 +52,8 @@ export class RunnerService {
     private uploadProcessor: TaskProcessor;
     private running = false;
 
-    // 任务状态缓存 - 用于在不同阶段之间传递数据
-    private taskStates: Map<string, TaskStateData> = new Map();
+    // 任务状态管理器 - 用于在不同阶段之间传递数据
+    private taskStates: TaskStateManager;
 
     constructor(config: RunnerConfig) {
         this.config = config;
@@ -71,6 +67,9 @@ export class RunnerService {
         this.convertProcessor = new TaskProcessor(TMP_DIR, this.apiClient, TaskStage.CONVERT);
         this.uploadProcessor = new TaskProcessor(TMP_DIR, this.apiClient, TaskStage.UPLOAD);
 
+        // 初始化任务状态管理器
+        this.taskStates = new TaskStateManager();
+
         // 设置事件监听
         this.setupEventListeners();
 
@@ -82,130 +81,154 @@ export class RunnerService {
      * 设置事件监听
      */
     private setupEventListeners() {
-        // 下载阶段事件
-        this.downloadProcessor.on('complete', (task: ProcessorTask) => {
-            logger.info(`Task ${task.id} completed download stage`);
-            logger.info(`Task object received in download complete event: ${JSON.stringify({
-                id: task.id,
-                status: task.status,
-                hasDownloadInfo: !!task.downloadInfo,
-                hasFilePath: !!task.downloadInfo?.filePath
-            })}`);
-
-            // 保存下载文件路径到状态缓存 - 增强路径获取逻辑
-            let downloadedFilePath = (task as any).downloadedFilePath;
-            logger.info(`Direct path from task object: ${downloadedFilePath || 'undefined'}`);
-
-            // 如果直接属性不存在，尝试从downloadInfo中获取
-            if (!downloadedFilePath && task.downloadInfo?.filePath) {
-                downloadedFilePath = task.downloadInfo.filePath;
-                logger.info(`Using file path from downloadInfo: ${downloadedFilePath}`);
+        // 设置下载处理器事件
+        this.setupProcessorEvents(
+            this.downloadProcessor,
+            TaskStage.DOWNLOAD,
+            (task: ProcessorTask) => {
+                // 保存下载文件路径到状态缓存
+                const downloadedFilePath = this.getTaskFilePath(task, 'downloadedFilePath', 'downloadInfo?.filePath');
+                if (downloadedFilePath) {
+                    this.taskStates.set(task.id, { downloadedFilePath });
+                    logger.info(`Saved download path for task ${task.id}: ${downloadedFilePath}`);
+                } else {
+                    logger.error(`No download path found for task ${task.id} - this will cause problems in convert stage`);
+                }
+                this.taskQueue.completeDownload(task);
             }
+        );
 
-            if (downloadedFilePath) {
-                this.taskStates.set(task.id, {
-                    ...this.taskStates.get(task.id) || {},
-                    downloadedFilePath
-                });
-                logger.info(`Saved download path for task ${task.id}: ${downloadedFilePath}`);
-                logger.info(`Task state cache updated: ${JSON.stringify(this.taskStates.get(task.id))}`);
-            } else {
-                logger.error(`No download path found for task ${task.id} - this will cause problems in convert stage`);
+        // 设置转换处理器事件
+        this.setupProcessorEvents(
+            this.convertProcessor,
+            TaskStage.CONVERT,
+            (task: ProcessorTask) => {
+                // 保存转换文件路径到状态缓存
+                const convertedFilePath = (task as any).convertedFilePath;
+                if (convertedFilePath) {
+                    this.taskStates.set(task.id, { convertedFilePath });
+                    logger.info(`Saved converted path for task ${task.id}: ${convertedFilePath}`);
+                } else {
+                    logger.warn(`No converted path found for task ${task.id}`);
+                }
+                this.taskQueue.completeConvert(task);
             }
+        );
 
-            this.taskQueue.completeDownload(task);
-        });
-
-        this.downloadProcessor.on('error', ({ task, error }: { task: ProcessorTask, error: Error }) => {
-            logger.error(`Task ${task.id} failed in download stage: ${error.message}`);
-            this.taskQueue.fail(task.id, TaskStage.DOWNLOAD, error);
-
-            // 清理任务状态缓存
-            this.taskStates.delete(task.id);
-        });
-
-        // 转码阶段事件
-        this.convertProcessor.on('complete', (task: ProcessorTask) => {
-            logger.info(`Task ${task.id} completed convert stage`);
-            logger.info(`Task object received in convert complete event: ${JSON.stringify({
-                id: task.id,
-                status: task.status,
-                hasConvertedFilePath: !!(task as any).convertedFilePath
-            })}`);
-
-            // 保存转换文件路径到状态缓存
-            const convertedFilePath = (task as any).convertedFilePath;
-            if (convertedFilePath) {
-                this.taskStates.set(task.id, {
-                    ...this.taskStates.get(task.id) || {},
-                    convertedFilePath
-                });
-                logger.info(`Saved converted path for task ${task.id}: ${convertedFilePath}`);
-                logger.info(`Task state cache updated: ${JSON.stringify(this.taskStates.get(task.id))}`);
-            } else {
-                logger.warn(`No converted path found for task ${task.id}`);
+        // 设置上传处理器事件
+        this.setupProcessorEvents(
+            this.uploadProcessor,
+            TaskStage.UPLOAD,
+            (task: ProcessorTask) => {
+                this.taskQueue.completeUpload(task);
+                // 清理任务状态缓存
+                this.taskStates.delete(task.id);
+                logger.info(`Cleared state cache for task ${task.id}`);
             }
-
-            this.taskQueue.completeConvert(task);
-        });
-
-        this.convertProcessor.on('error', ({ task, error }: { task: ProcessorTask, error: Error }) => {
-            logger.error(`Task ${task.id} failed in convert stage: ${error.message}`);
-            this.taskQueue.fail(task.id, TaskStage.CONVERT, error);
-
-            // 清理任务状态缓存
-            this.taskStates.delete(task.id);
-        });
-
-        // 上传阶段事件
-        this.uploadProcessor.on('complete', (task: ProcessorTask) => {
-            logger.info(`Task ${task.id} completed upload stage`);
-            this.taskQueue.completeUpload(task);
-
-            // 清理任务状态缓存
-            this.taskStates.delete(task.id);
-            logger.info(`Cleared state cache for task ${task.id}`);
-        });
-
-        this.uploadProcessor.on('error', ({ task, error }: { task: ProcessorTask, error: Error }) => {
-            logger.error(`Task ${task.id} failed in upload stage: ${error.message}`);
-            this.taskQueue.fail(task.id, TaskStage.UPLOAD, error);
-
-            // 清理任务状态缓存
-            this.taskStates.delete(task.id);
-            logger.info(`Cleared state cache for task ${task.id} due to error`);
-        });
+        );
 
         // 任务队列状态变更事件
         this.taskQueue.on('updated', (stats) => {
             logger.debug(`Queue stats: Download (waiting: ${stats.download.waiting}, processing: ${stats.download.processing}), Convert (waiting: ${stats.convert.waiting}, processing: ${stats.convert.processing}), Upload (waiting: ${stats.upload.waiting}, processing: ${stats.upload.processing})`);
         });
+    }
 
-        // 任务状态变更事件
-        this.downloadProcessor.on('stateChange', (state: string) => {
-            logger.info(`Download task state changed to: ${state}`);
+    /**
+     * 为处理器设置通用事件监听
+     */
+    private setupProcessorEvents(
+        processor: TaskProcessor,
+        stage: TaskStage,
+        completeHandler: (task: ProcessorTask) => void
+    ) {
+        // 完成事件
+        processor.on('complete', (task: ProcessorTask) => {
+            logger.info(`Task ${task.id} completed ${stage} stage`);
+            this.logTaskState(task, stage, 'complete');
+            completeHandler(task);
         });
 
-        this.convertProcessor.on('stateChange', (state: string) => {
-            logger.info(`Convert task state changed to: ${state}`);
+        // 错误事件
+        processor.on('error', ({ task, error }: { task: ProcessorTask, error: Error }) => {
+            logger.error(`Task ${task.id} failed in ${stage} stage: ${error.message}`);
+            this.taskQueue.fail(task.id, stage, error);
+            // 清理任务状态缓存
+            this.taskStates.delete(task.id);
         });
 
-        this.uploadProcessor.on('stateChange', (state: string) => {
-            logger.info(`Upload task state changed to: ${state}`);
+        // 状态变更事件
+        processor.on('stateChange', (state: string) => {
+            logger.info(`${this.getStageName(stage)} task state changed to: ${state}`);
         });
 
-        // 任务进度事件
-        this.downloadProcessor.on('progress', ({ stage, info }: { stage: string, info: any }) => {
-            logger.debug(`download progress: ${info.progress?.toFixed(2)}%`);
+        // 进度事件
+        processor.on('progress', ({ stage: stageType, info }: { stage: string, info: any }) => {
+            logger.debug(`${this.getStageName(stage)} progress: ${info.progress?.toFixed(2)}%`);
         });
+    }
 
-        this.convertProcessor.on('progress', ({ stage, info }: { stage: string, info: any }) => {
-            logger.debug(`convert progress: ${info.progress?.toFixed(2)}%`);
-        });
+    /**
+     * 获取阶段名称
+     */
+    private getStageName(stage: TaskStage): string {
+        switch (stage) {
+            case TaskStage.DOWNLOAD: return 'download';
+            case TaskStage.CONVERT: return 'convert';
+            case TaskStage.UPLOAD: return 'upload';
+            default: return 'unknown';
+        }
+    }
 
-        this.uploadProcessor.on('progress', ({ stage, info }: { stage: string, info: any }) => {
-            logger.debug(`upload progress: ${info.progress?.toFixed(2)}%`);
-        });
+    /**
+     * 记录任务状态
+     */
+    private logTaskState(task: ProcessorTask, stage: TaskStage, event: string) {
+        const stateInfo: Record<string, any> = {
+            id: task.id,
+            status: task.status,
+            hasDownloadInfo: !!task.downloadInfo,
+        };
+
+        // 根据阶段添加不同的状态信息
+        if (stage === TaskStage.DOWNLOAD || stage === TaskStage.CONVERT) {
+            stateInfo.hasDownloadPath = !!(task as any).downloadedFilePath;
+            stateInfo.downloadPath = (task as any).downloadedFilePath;
+            stateInfo.downloadInfoPath = task.downloadInfo?.filePath;
+        }
+
+        if (stage === TaskStage.CONVERT || stage === TaskStage.UPLOAD) {
+            stateInfo.hasConvertedPath = !!(task as any).convertedFilePath;
+            stateInfo.convertedPath = (task as any).convertedFilePath;
+        }
+
+        logger.info(`Task object in ${this.getStageName(stage)} ${event} event: ${JSON.stringify(stateInfo)}`);
+    }
+
+    /**
+     * 从任务对象中获取文件路径
+     */
+    private getTaskFilePath(task: ProcessorTask, directPath: string, nestedPath?: string): string | undefined {
+        // 尝试直接从任务对象获取
+        let filePath = (task as any)[directPath];
+        logger.info(`Direct path from task object (${directPath}): ${filePath || 'undefined'}`);
+
+        // 如果直接属性不存在，尝试从嵌套路径获取
+        if (!filePath && nestedPath) {
+            // 解析嵌套路径，例如 "downloadInfo?.filePath"
+            const parts = nestedPath.split('?.');
+            let value: any = task;
+            for (const part of parts) {
+                if (value === undefined || value === null) break;
+                value = value[part];
+            }
+
+            if (value) {
+                filePath = value;
+                logger.info(`Using file path from nested path (${nestedPath}): ${filePath}`);
+            }
+        }
+
+        return filePath;
     }
 
     async start() {
@@ -234,7 +257,7 @@ export class RunnerService {
 
             logger.info(`Runner started with ID: ${this.config.machineId}`);
         } catch (error) {
-            logger.error(`Failed to start runner: ${error}`);
+            logger.error(`Failed to start runner: ${formatErrorMessage(error)}`);
             throw error;
         }
     }
@@ -271,7 +294,7 @@ export class RunnerService {
                 throw new Error('Failed to register: No runner data in response');
             }
         } catch (error: any) {
-            logger.error(`Failed to register: ${error.message}`);
+            logger.error(`Failed to register: ${formatErrorMessage(error)}`);
             if (error.response) {
                 logger.error(`Response status: ${error.response.status}`);
                 logger.error(`Response data: ${JSON.stringify(error.response.data)}`);
@@ -290,7 +313,7 @@ export class RunnerService {
                 });
                 logger.info('Heartbeat sent');
             } catch (error) {
-                logger.error(`Heartbeat failed: ${error}`);
+                logger.error(`Heartbeat failed: ${formatErrorMessage(error)}`);
             }
         }, this.config.heartbeatInterval);
     }
@@ -311,7 +334,7 @@ export class RunnerService {
                     this.processUploadTasks()
                 ]);
             } catch (error) {
-                logger.error(`Task processing error: ${error}`);
+                logger.error(`Task processing error: ${formatErrorMessage(error)}`);
             }
 
             // 避免CPU过度使用
@@ -326,7 +349,8 @@ export class RunnerService {
                 // 使用下载处理器处理任务
                 await this.downloadProcessor.process(task);
             } catch (error) {
-                logger.error(`Download processing error: ${error}`);
+                logger.error(`Download processing error: ${formatErrorMessage(error)}`);
+                this.handleTaskError(task, TaskStage.DOWNLOAD, error);
             }
         }
     }
@@ -336,57 +360,15 @@ export class RunnerService {
         if (task) {
             try {
                 logger.info(`Processing convert task: ${task.id}`);
-                logger.info(`Task object before convert: ${JSON.stringify({
-                    id: task.id,
-                    status: task.status,
-                    hasDownloadedFilePath: !!(task as any).downloadedFilePath,
-                    hasDownloadInfo: !!task.downloadInfo,
-                    hasFilePath: !!task.downloadInfo?.filePath
-                })}`);
 
                 // 从状态缓存中恢复任务状态
-                const stateData = this.taskStates.get(task.id);
-                logger.info(`State cache for task ${task.id}: ${JSON.stringify(stateData || {})}`);
-
-                if (stateData?.downloadedFilePath) {
-                    // 将下载文件路径添加到任务对象
-                    (task as any).downloadedFilePath = stateData.downloadedFilePath;
-                    logger.info(`Restored download path for task ${task.id}: ${stateData.downloadedFilePath}`);
-
-                    // 同时更新downloadInfo，以防其他代码依赖它
-                    if (!task.downloadInfo) {
-                        task.downloadInfo = {
-                            startTime: new Date().toISOString(),
-                            sourceUrl: task.source,
-                            filePath: stateData.downloadedFilePath
-                        };
-                    } else if (!task.downloadInfo.filePath) {
-                        task.downloadInfo.filePath = stateData.downloadedFilePath;
-                    }
-
-                    logger.info(`Task object after path restoration: ${JSON.stringify({
-                        id: task.id,
-                        status: task.status,
-                        hasDownloadedFilePath: !!(task as any).downloadedFilePath,
-                        downloadedFilePath: (task as any).downloadedFilePath,
-                        hasDownloadInfo: !!task.downloadInfo,
-                        downloadInfoFilePath: task.downloadInfo?.filePath
-                    })}`);
-                } else {
-                    // 如果状态缓存中没有找到下载文件路径，记录错误并抛出异常
-                    const errorMsg = `No download path found in cache for task ${task.id}`;
-                    logger.error(errorMsg);
-                    throw new Error(errorMsg);
-                }
+                await this.restoreTaskState(task, 'downloadedFilePath', 'No download path found in cache');
 
                 // 使用转码处理器处理任务
                 await this.convertProcessor.process(task);
             } catch (error) {
-                logger.error(`Convert processing error: ${error}`);
-                // 确保任务失败被正确处理
-                this.taskQueue.fail(task.id, TaskStage.CONVERT, error instanceof Error ? error : new Error(String(error)));
-                // 清理任务状态缓存
-                this.taskStates.delete(task.id);
+                logger.error(`Convert processing error: ${formatErrorMessage(error)}`);
+                this.handleTaskError(task, TaskStage.CONVERT, error);
             }
         }
     }
@@ -396,28 +378,74 @@ export class RunnerService {
         if (task) {
             try {
                 // 从状态缓存中恢复任务状态
-                const stateData = this.taskStates.get(task.id);
-                if (stateData?.convertedFilePath) {
-                    // 将转换文件路径添加到任务对象
-                    (task as any).convertedFilePath = stateData.convertedFilePath;
-                    logger.info(`Restored converted path for task ${task.id}: ${stateData.convertedFilePath}`);
-                } else {
-                    // 如果状态缓存中没有找到转换文件路径，记录错误并抛出异常
-                    const errorMsg = `No converted path found in cache for task ${task.id}`;
-                    logger.error(errorMsg);
-                    throw new Error(errorMsg);
-                }
+                await this.restoreTaskState(task, 'convertedFilePath', 'No converted path found in cache');
 
                 // 使用上传处理器处理任务
                 await this.uploadProcessor.process(task);
             } catch (error) {
-                logger.error(`Upload processing error: ${error}`);
-                // 确保任务失败被正确处理
-                this.taskQueue.fail(task.id, TaskStage.UPLOAD, error instanceof Error ? error : new Error(String(error)));
-                // 清理任务状态缓存
-                this.taskStates.delete(task.id);
+                logger.error(`Upload processing error: ${formatErrorMessage(error)}`);
+                this.handleTaskError(task, TaskStage.UPLOAD, error);
             }
         }
+    }
+
+    /**
+     * 从状态缓存中恢复任务状态
+     */
+    private async restoreTaskState(task: ProcessorTask, stateKey: string, errorMessage: string): Promise<void> {
+        const stateData = this.taskStates.get(task.id);
+        logger.info(`State cache for task ${task.id}: ${JSON.stringify(stateData || {})}`);
+
+        if (stateData?.[stateKey]) {
+            // 将状态数据添加到任务对象
+            (task as any)[stateKey] = stateData[stateKey];
+            logger.info(`Restored ${stateKey} for task ${task.id}: ${stateData[stateKey]}`);
+
+            // 如果是下载文件路径，同时更新downloadInfo
+            if (stateKey === 'downloadedFilePath') {
+                this.updateDownloadInfo(task, stateData[stateKey]);
+            }
+        } else {
+            // 如果状态缓存中没有找到所需数据，记录错误并抛出异常
+            const errorMsg = `${errorMessage} for task ${task.id}`;
+            logger.error(errorMsg);
+            throw new Error(errorMsg);
+        }
+    }
+
+    /**
+     * 更新任务的downloadInfo
+     */
+    private updateDownloadInfo(task: ProcessorTask, filePath: string): void {
+        if (!task.downloadInfo) {
+            task.downloadInfo = {
+                startTime: new Date().toISOString(),
+                sourceUrl: task.source,
+                filePath: filePath
+            };
+        } else if (!task.downloadInfo.filePath) {
+            task.downloadInfo.filePath = filePath;
+        }
+
+        logger.info(`Task object after path restoration: ${JSON.stringify({
+            id: task.id,
+            status: task.status,
+            hasDownloadedFilePath: !!(task as any).downloadedFilePath,
+            downloadedFilePath: (task as any).downloadedFilePath,
+            hasDownloadInfo: !!task.downloadInfo,
+            downloadInfoFilePath: task.downloadInfo?.filePath
+        })}`);
+    }
+
+    /**
+     * 处理任务错误
+     */
+    private handleTaskError(task: ProcessorTask, stage: TaskStage, error: unknown): void {
+        // 确保任务失败被正确处理
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        this.taskQueue.fail(task.id, stage, errorObj);
+        // 清理任务状态缓存
+        this.taskStates.delete(task.id);
     }
 
     private async checkAndFetchNewTask() {
@@ -466,7 +494,7 @@ export class RunnerService {
                     // 添加到下载队列
                     this.taskQueue.add(processableTask);
                 } catch (startError: any) {
-                    logger.error(`Failed to start task ${task.id}: ${startError instanceof Error ? startError.message : String(startError)}`);
+                    logger.error(`Failed to start task ${task.id}: ${formatErrorMessage(startError)}`);
 
                     // 记录详细的错误信息
                     if (startError.response) {
@@ -476,7 +504,7 @@ export class RunnerService {
                 }
             }
         } catch (error) {
-            logger.error(`Failed to check task: ${error instanceof Error ? error.message : String(error)}`);
+            logger.error(`Failed to check task: ${formatErrorMessage(error)}`);
         }
     }
 
